@@ -10,8 +10,8 @@
         "front": 6000
     },
     "repo": {
-        "name": "parbft_bvaba",
-        "url": "https://github.com/ac-dcz/parbft_bvaba",
+        "name": "parbft-plus",
+        "url": "https://github.com/ac-dcz/parbft-plus",
         "branch": "main"
     },
     "instances": {
