@@ -123,11 +123,6 @@ impl Synchronizer {
                                     if let Err(e) = consensus_channel_smvba.send(message).await {
                                         panic!("Failed to send message to consensus: {}", e);
                                     }
-                                }else{
-                                    let message = ConsensusMessage::FBLoopBack(block);
-                                    if let Err(e) = consensus_channel_smvba.send(message).await {
-                                        panic!("Failed to send message to consensus: {}", e);
-                                    }
                                 }
 
                             },

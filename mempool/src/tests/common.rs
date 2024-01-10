@@ -64,7 +64,6 @@ pub fn block() -> Block {
         author,
         height: 1,
         epoch: 1,
-        round: 0,
         payload: Vec::new(),
         signature: Signature::default(),
         tag: 0,

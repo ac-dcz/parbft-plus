@@ -32,7 +32,6 @@ pub type SeqNumber = u64; // For both round and view
 
 pub const OPT: u8 = 0;
 pub const PES: u8 = 1;
-pub const FALLBACK: u8 = 2;
 
 pub const INIT_PHASE: u8 = 0;
 pub const LOCK_PHASE: u8 = 1;
@@ -54,9 +53,6 @@ pub enum ConsensusMessage {
     SMVBAHalt(MHalt), //mvba halt
     ParPrePare(PrePare),
     ParLoopBack(Block),
-    FBPropose(Block),
-    FBVote(HVote),
-    FBLoopBack(Block),
 }
 
 pub struct Core {
@@ -102,8 +98,6 @@ pub struct Core {
     prepare_tag: HashMap<SeqNumber, PrePare>, //标记 height高度的 val是否已经发送
     par_prepare_opts: HashMap<SeqNumber, HashMap<PublicKey, Signature>>,
     par_prepare_pess: HashMap<SeqNumber, HashMap<PublicKey, Signature>>,
-    fallback_length: SeqNumber,
-    fallback_high_qc: HashMap<(SeqNumber, SeqNumber), Option<QC>>,
 }
 impl Core {
     #[allow(clippy::too_many_arguments)]
@@ -128,7 +122,6 @@ impl Core {
         pes_path: bool,
     ) -> Self {
         let aggregator = Aggregator::new(committee.clone());
-        let fallback_length = parameters.fallback_length.clone();
         let mut core = Self {
             name,
             committee,
@@ -172,8 +165,6 @@ impl Core {
             prepare_tag: HashMap::new(),
             par_prepare_opts: HashMap::new(),
             par_prepare_pess: HashMap::new(),
-            fallback_length,
-            fallback_high_qc: HashMap::new(),
         };
         core.update_smvba_state(1, 1);
         core.update_prepare_state(1);
@@ -207,7 +198,6 @@ impl Core {
         self.prepare_tag.clear();
         self.par_prepare_opts.clear();
         self.par_prepare_pess.clear();
-        self.fallback_high_qc.clear();
         self.update_smvba_state(1, 1);
         self.update_prepare_state(1);
     }
@@ -249,7 +239,6 @@ impl Core {
         self.par_prepare_opts.retain(|h, _| h > height);
         self.par_prepare_pess.retain(|h, _| h > height);
         self.spb_abandon_flag.retain(|h, _| h > height);
-        self.fallback_high_qc.retain(|(h, _), _| h > height);
     }
 
     async fn store_block(&mut self, block: &Block) {
@@ -288,13 +277,7 @@ impl Core {
     }
 
     #[async_recursion]
-    async fn generate_proposal(
-        &mut self,
-        height: SeqNumber,
-        round: SeqNumber,
-        qc: Option<QC>,
-        tag: u8,
-    ) -> Block {
+    async fn generate_proposal(&mut self, height: SeqNumber, qc: Option<QC>, tag: u8) -> Block {
         // Make a new block.
         let payload = self
             .mempool_driver
@@ -305,7 +288,6 @@ impl Core {
             self.name,
             height,
             self.epoch,
-            round,
             payload,
             self.signature_service.clone(),
             tag,
@@ -313,20 +295,16 @@ impl Core {
         .await;
 
         if !block.payload.is_empty() {
-            info!(
-                "Created {} epoch {} round {} tag {}",
-                block, block.epoch, block.round, block.tag
-            );
+            info!("Created {} epoch {} tag {}", block, block.epoch, block.tag);
 
             #[cfg(feature = "benchmark")]
             for x in &block.payload {
                 // NOTE: This log entry is used to compute performance.
                 info!(
-                    "Created B{}({}) epoch {} round {} tag {}",
+                    "Created B{}({}) epoch {} tag {}",
                     block.height,
                     base64::encode(x),
                     block.epoch,
-                    block.round,
                     block.tag
                 );
             }
@@ -342,18 +320,17 @@ impl Core {
         while current_block.height > self.last_committed_height {
             if !current_block.payload.is_empty() {
                 info!(
-                    "Committed {} epoch {} round {} tag {}",
-                    current_block, current_block.epoch, current_block.round, current_block.tag
+                    "Committed {} epoch {} tag {}",
+                    current_block, current_block.epoch, current_block.tag
                 );
 
                 #[cfg(feature = "benchmark")]
                 for x in &current_block.payload {
                     info!(
-                        "Committed B{}({}) epoch {} round {} tag {}",
+                        "Committed B{}({}) epoch {} tag {}",
                         current_block.height,
                         base64::encode(x),
                         current_block.epoch,
-                        current_block.round,
                         current_block.tag
                     );
                 }
@@ -503,8 +480,8 @@ impl Core {
         }
         //2. 在完全乐观情况下 延迟启动
         if self.is_optmistic() && self.pes_path {
-            self.invoke_fallback(block.height, Some(block.qc.clone()))
-                .await?;
+            // self.invoke_fallback(block.height, Some(block.qc.clone()))
+            //     .await?;
         }
 
         // The chain should have consecutive round numbers by construction.
@@ -584,7 +561,7 @@ impl Core {
         // Ensure we won't vote for contradicting blocks.
         self.increase_last_voted_round(block.height);
         // TODO [issue #15]: Write to storage preferred_round and last_voted_round.
-        Some(HVote::new(&block, self.name, OPT, self.signature_service.clone()).await)
+        Some(HVote::new(&block, self.name, self.signature_service.clone()).await)
     }
 
     #[async_recursion]
@@ -608,156 +585,19 @@ impl Core {
             // Make a new block if we are the next leader.
             if self.name == self.leader_elector.get_leader(self.height) {
                 let block = self
-                    .generate_proposal(self.height, 0, Some(self.high_qc.clone()), OPT)
+                    .generate_proposal(self.height, Some(self.high_qc.clone()), OPT)
                     .await;
                 self.broadcast_opt_propose(block).await?;
             }
             if self.pes_path && !self.is_optmistic() {
-                self.invoke_fallback(self.height, Some(self.high_qc.clone()))
-                    .await?;
+                // self.invoke_fallback(self.height, Some(self.high_qc.clone()))
+                //     .await?;
             }
         }
         Ok(())
     }
 
     /***********************two-chain hotstuff*************************/
-
-    /***********************fallback**********************/
-
-    fn fallback_message_filter(&mut self, epoch: SeqNumber, height: SeqNumber) -> bool {
-        if self.height >= height + 2 || self.epoch > epoch {
-            return false;
-        }
-        // if *self.smvba_is_invoke.entry(height).or_insert(false) {
-        //     return false;
-        // }
-        true
-    }
-
-    async fn invoke_fallback(&mut self, height: SeqNumber, qc: Option<QC>) -> ConsensusResult<()> {
-        let block = self.generate_proposal(height, 1, qc, PES).await;
-        self.broadcast_fallback_propose(block).await?;
-        Ok(())
-    }
-
-    async fn broadcast_fallback_propose(&mut self, block: Block) -> ConsensusResult<()> {
-        if *self.smvba_is_invoke.entry(block.height).or_insert(false) {
-            return Ok(());
-        }
-        let message = ConsensusMessage::FBPropose(block.clone());
-        Synchronizer::transmit(
-            message,
-            &self.name,
-            None,
-            &self.network_filter_smvba,
-            &self.committee,
-            PES,
-        )
-        .await?;
-        self.process_fallback_propose(&block).await?;
-        if self.parameters.ddos {
-            sleep(Duration::from_millis(self.parameters.min_block_delay)).await;
-        }
-        Ok(())
-    }
-
-    async fn make_fallback_vote(&mut self, block: &Block) -> Option<HVote> {
-        if block.height + 2 <= self.height {
-            return None;
-        }
-        Some(HVote::new(&block, self.name, PES, self.signature_service.clone()).await)
-    }
-
-    #[async_recursion]
-    async fn handle_fallback_vote(&mut self, vote: &HVote) -> ConsensusResult<()> {
-        ensure!(
-            self.fallback_message_filter(vote.epoch, vote.height),
-            ConsensusError::TimeOutMessage(vote.epoch, vote.height)
-        );
-
-        if self.parameters.exp == 1 {
-            vote.verify(&self.committee)?;
-        }
-
-        if let Some(qc) = self.aggregator.add_fallback_vote(vote.clone())? {
-            self.fallback_high_qc
-                .insert((qc.height, qc.round), Some(qc.clone()));
-            if qc.proposer == self.name {
-                if qc.round < self.fallback_length {
-                    let block = self
-                        .generate_proposal(qc.height, qc.round + 1, Some(qc.clone()), PES)
-                        .await;
-                    self.broadcast_fallback_propose(block).await?;
-                } else if qc.round == self.fallback_length {
-                    //启动prepare
-                    self.active_prepare_pahse(qc.height, qc, PES).await?;
-                }
-            }
-        }
-
-        Ok(())
-    }
-
-    async fn handle_fallback_propose(&mut self, block: &Block) -> ConsensusResult<()> {
-        ensure!(
-            self.fallback_message_filter(block.epoch, block.height),
-            ConsensusError::TimeOutMessage(block.epoch, block.height)
-        );
-
-        if self.parameters.exp == 1 {
-            block.verify(&self.committee)?
-        }
-
-        if block.epoch > self.epoch {
-            let b = block.clone();
-            self.unhandle_message
-                .push_back((b.epoch, ConsensusMessage::FBPropose(b)));
-            return Err(ConsensusError::EpochEnd(self.epoch));
-        }
-
-        // Let's see if we have the block's data. If we don't, the mempool
-        // will get it and then make us resume processing this block.
-        if !self.mempool_driver.verify(block.clone(), FALLBACK).await? {
-            debug!(
-                "Processing of {} suspended: missing payload",
-                block.digest()
-            );
-            return Ok(());
-        }
-
-        self.process_fallback_propose(block).await?;
-        Ok(())
-    }
-
-    async fn process_fallback_propose(&mut self, block: &Block) -> ConsensusResult<()> {
-        ensure!(
-            self.fallback_message_filter(block.epoch, block.height),
-            ConsensusError::TimeOutMessage(block.epoch, block.height)
-        );
-
-        self.store_block(block).await;
-
-        if let Some(vote) = self.make_fallback_vote(block).await {
-            if block.author != self.name {
-                let message = ConsensusMessage::FBVote(vote);
-                Synchronizer::transmit(
-                    message,
-                    &self.name,
-                    Some(&block.author),
-                    &self.network_filter_smvba,
-                    &self.committee,
-                    PES,
-                )
-                .await?;
-            } else {
-                self.handle_fallback_vote(&vote).await?;
-            }
-        }
-
-        Ok(())
-    }
-
-    /***********************fallback**********************/
 
     /*************************Prepare**************************/
 
@@ -807,7 +647,7 @@ impl Core {
             ConsensusError::TimeOutMessage(prepare.epoch, prepare.height)
         );
         if self.parameters.exp == 1 {
-            prepare.verify(&self.committee, self.fallback_length)?;
+            prepare.verify(&self.committee)?;
         }
 
         let opt_set = self
@@ -871,17 +711,9 @@ impl Core {
                     .into_iter()
                     .map(|(k, v)| (k.clone(), v.clone()))
                     .collect();
-                if (pes_set.len() as u32) >= self.committee.quorum_threshold() {
-                    //启动smvba
-                    if let Some(qc) = self
-                        .fallback_high_qc
-                        .entry((prepare.height, self.fallback_length))
-                        .or_insert(None)
-                    {
-                        let _qc = qc.clone();
-                        self.invoke_smvba(prepare.height, PES, signatures, Some(_qc))
-                            .await?;
-                    }
+                if (pes_set.len() as u32) == self.committee.quorum_threshold() {
+                    self.invoke_smvba(prepare.height, PES, signatures, Some(prepare.qc.clone()))
+                        .await?;
                 }
             }
             _ => return Err(ConsensusError::InvalidPrePareTag(prepare.val)),
@@ -893,6 +725,7 @@ impl Core {
     /*************************Prepare**************************/
 
     /******************SMVAB********************************************/
+
     async fn smvba_round_advance(
         &mut self,
         height: SeqNumber,
@@ -915,12 +748,7 @@ impl Core {
             let last_value = self.spb_proposes.get(&(height, 1)).unwrap().clone();
 
             let block = self
-                .generate_proposal(
-                    height,
-                    self.fallback_length + 1,
-                    Some(last_value.block.qc.clone()),
-                    PES,
-                )
+                .generate_proposal(height, Some(last_value.block.qc.clone()), PES)
                 .await;
 
             let value = SPBValue::new(
@@ -958,9 +786,7 @@ impl Core {
         if val == OPT {
             block = Block::default();
         } else {
-            block = self
-                .generate_proposal(height, self.fallback_length + 1, qc, PES)
-                .await;
+            block = self.generate_proposal(height, qc, PES).await;
         }
         // let block = self
         //     .generate_proposal(height, self.fallback_length + 1, qc, PES)
@@ -1049,7 +875,7 @@ impl Core {
 
         if self.parameters.exp == 1 {
             //验证Proof是否正确
-            value.verify(&self.committee, &proof, self.fallback_length)?;
+            value.verify(&self.committee, &proof)?;
         }
 
         if value.block.epoch > self.epoch {
@@ -1175,7 +1001,7 @@ impl Core {
         );
 
         if self.parameters.exp == 1 {
-            value.verify(&self.committee, &proof, self.fallback_length)?;
+            value.verify(&self.committee, &proof)?;
         }
 
         self.spb_finishs
@@ -1262,7 +1088,7 @@ impl Core {
         );
 
         if self.parameters.exp == 1 {
-            prevote.verify(&self.committee, self.fallback_length)?;
+            prevote.verify(&self.committee)?;
         }
 
         let y_flag = self
@@ -1347,7 +1173,7 @@ impl Core {
         );
 
         if self.parameters.exp == 1 {
-            mvote.verify(&self.committee, &self.pk_set, self.fallback_length)?;
+            mvote.verify(&self.committee, &self.pk_set)?;
         }
 
         let set = self
@@ -1565,7 +1391,7 @@ impl Core {
         );
 
         if self.parameters.exp == 1 {
-            halt.verify(&self.committee, &self.pk_set, self.fallback_length)?;
+            halt.verify(&self.committee, &self.pk_set)?;
         }
 
         if self.leader_elector.get_coin_leader(halt.height, halt.round)
@@ -1656,11 +1482,6 @@ impl Core {
                                     panic!("Failed to send last epoch message: {}", e);
                                 }
                             }
-                            ConsensusMessage::FBPropose(..) => {
-                                if let Err(e) = self.tx_smvba.send(msg).await {
-                                    panic!("Failed to send last epoch message: {}", e);
-                                }
-                            }
                             _ => break,
                         }
                     }
@@ -1676,7 +1497,7 @@ impl Core {
         if self.opt_path && self.name == self.leader_elector.get_leader(self.height) {
             //如果是leader就发送propose
             let block = self
-                .generate_proposal(self.height, 0, Some(self.high_qc.clone()), OPT)
+                .generate_proposal(self.height, Some(self.high_qc.clone()), OPT)
                 .await;
             self.broadcast_opt_propose(block)
                 .await
@@ -1684,10 +1505,7 @@ impl Core {
         }
 
         if !self.opt_path || (self.pes_path && !self.is_optmistic()) {
-            // self.invoke_smvba(self.height, OPT, Vec::new(), None)
-            //     .await
-            //     .expect("Failed to send the first PES block");
-            self.invoke_fallback(self.height, Some(self.high_qc.clone()))
+            self.active_prepare_pahse(self.height, self.high_qc.clone(), OPT)
                 .await
                 .expect("Failed to send the first PES block");
         }
@@ -1709,9 +1527,6 @@ impl Core {
                 },
                 Some(message) = self.smvba_channel.recv() => {
                     match message {
-                        ConsensusMessage::FBPropose(block)=>self.handle_fallback_propose(&block).await,
-                        ConsensusMessage::FBVote(vote)=>self.handle_fallback_vote(&vote).await,
-                        ConsensusMessage::FBLoopBack(block)=>self.process_fallback_propose(&block).await,
                         ConsensusMessage::SPBPropose(value,proof)=> self.handle_spb_proposal(value,proof).await,
                         ConsensusMessage::SPBVote(vote)=> self.handle_spb_vote(&vote).await,
                         ConsensusMessage::SPBFinsh(value,proof)=> self.handle_spb_finish(value,proof).await,

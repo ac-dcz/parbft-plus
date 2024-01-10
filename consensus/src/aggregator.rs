@@ -16,7 +16,6 @@ pub mod aggregator_tests;
 pub struct Aggregator {
     committee: Committee,
     hs_votes_aggregators: HashMap<SeqNumber, Box<QCMaker>>,
-    fallback_votes_aggregators: HashMap<(SeqNumber, SeqNumber), Box<QCMaker>>,
     spb_votes_aggregators: HashMap<(SeqNumber, SeqNumber, u8), Box<ProofMaker>>,
     pre_votes_aggregators: HashMap<(SeqNumber, SeqNumber), Box<ProofMaker>>,
     smvba_randomcoin_aggregators: HashMap<(SeqNumber, SeqNumber), Box<SMVBARandomCoinMaker>>,
@@ -27,7 +26,6 @@ impl Aggregator {
         Self {
             committee,
             hs_votes_aggregators: HashMap::new(),
-            fallback_votes_aggregators: HashMap::new(),
             spb_votes_aggregators: HashMap::new(),
             smvba_randomcoin_aggregators: HashMap::new(),
             pre_votes_aggregators: HashMap::new(),
@@ -41,13 +39,6 @@ impl Aggregator {
         // Add the new vote to our aggregator and see if we have a QC.
         self.hs_votes_aggregators
             .entry(vote.height)
-            .or_insert_with(|| Box::new(QCMaker::new()))
-            .append(vote, &self.committee)
-    }
-
-    pub fn add_fallback_vote(&mut self, vote: HVote) -> ConsensusResult<Option<QC>> {
-        self.fallback_votes_aggregators
-            .entry((vote.height, vote.round))
             .or_insert_with(|| Box::new(QCMaker::new()))
             .append(vote, &self.committee)
     }
@@ -133,8 +124,6 @@ impl QCMaker {
                 hash: vote.hash.clone(),
                 height: vote.height,
                 epoch: vote.epoch,
-                round: vote.round,
-                tag: vote.tag,
                 proposer: vote.proposer,
                 acceptor: vote.proposer,
                 votes: self.votes.clone(),

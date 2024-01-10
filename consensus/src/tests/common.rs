@@ -58,7 +58,6 @@ impl Block {
             author,
             height,
             epoch: 0,
-            round: 0,
             payload,
             signature: Signature::default(),
             tag: OPT,
@@ -88,8 +87,6 @@ impl HVote {
             epoch: 0,
             proposer,
             author,
-            round: 0,
-            tag: OPT,
             signature: Signature::default(),
         };
         let signature = Signature::new(&vote.digest(), &secret);
@@ -138,8 +135,6 @@ pub fn qc() -> QC {
         hash: Digest::default(),
         height: 1,
         epoch: 0,
-        round: 0,
-        tag: OPT,
         proposer: public_key,
         acceptor: public_key,
         votes: Vec::new(),
@@ -173,8 +168,6 @@ pub fn chain(keys: Vec<(PublicKey, SecretKey)>) -> Vec<Block> {
             // Make a qc for that block (it will be used for the next block).
             let qc = QC {
                 epoch: 0,
-                tag: OPT,
-                round: 0,
                 hash: block.digest(),
                 height: block.height,
                 proposer: block.author,
